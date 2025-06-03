@@ -32,11 +32,9 @@ const ChatPage = () => {
   const inputRef = useRef(null);
   const chatBoxRef = useRef(null);
   const [stompClient, setStompClient] = useState(null);
-
-  // --- NEW: file input ref for image upload ---
   const fileInputRef = useRef(null);
 
-  // load existing messages
+  // Load existing messages
   useEffect(() => {
     async function loadMessages() {
       try {
@@ -51,7 +49,7 @@ const ChatPage = () => {
     }
   }, [connected, roomId]);
 
-  // auto-scroll to bottom on new message
+  // Auto‐scroll on new message
   useEffect(() => {
     if (chatBoxRef.current) {
       chatBoxRef.current.scroll({
@@ -61,22 +59,40 @@ const ChatPage = () => {
     }
   }, [messages]);
 
-  // WebSocket connection + subscribe
+  // WebSocket connect + subscribe
   useEffect(() => {
     if (!connected) return;
     const sock = new SockJS(`${baseURL}/chat`);
     const client = Stomp.over(sock);
-    client.connect({}, () => {
-      setStompClient(client);
-      toast.success("connected");
-      client.subscribe(`/topic/room/${roomId}`, (frame) => {
-        const newMessage = JSON.parse(frame.body);
-        setMessages((prev) => [...prev, newMessage]);
-      });
-    });
+    const token = localStorage.getItem("authToken");
+
+    client.connect(
+        { Authorization: `Bearer ${token}` },
+        () => {
+          setStompClient(client);
+          toast.success("connected");
+          client.subscribe(`/topic/room/${roomId}`, (frame) => {
+            const incoming = JSON.parse(frame.body);
+            setMessages((prev) => {
+              const idx = prev.findIndex((m) => m.messageId === incoming.messageId);
+              if (idx !== -1) {
+                const copy = [...prev];
+                copy[idx] = incoming;
+                return copy;
+              } else {
+                return [...prev, incoming];
+              }
+            });
+          });
+        },
+        (error) => {
+          console.error("STOMP error:", error);
+          toast.error("WebSocket connection failed");
+        }
+    );
   }, [connected, roomId]);
 
-  // send text message
+  // Send text message
   const sendMessage = async () => {
     if (stompClient && connected && input.trim()) {
       const message = {
@@ -89,7 +105,7 @@ const ChatPage = () => {
     }
   };
 
-  // --- NEW: handle selecting & uploading an image ---
+  // Handle image upload
   const handleFileChange = async (e) => {
     const file = e.target.files[0];
     if (!file || !stompClient) return;
@@ -99,103 +115,186 @@ const ChatPage = () => {
     formData.append("sender", currentUser);
 
     try {
-      const resp = await httpClient.post(
+      await httpClient.post(
           `/api/v1/rooms/${roomId}/images`,
           formData,
           { headers: { "Content-Type": "multipart/form-data" } }
       );
-      const { imageUrl } = resp.data;
-      // STOMP‐send only the image
-      stompClient.send(
-          `/app/sendMessage/${roomId}`,
-          {},
-          JSON.stringify({ sender: currentUser, imageUrl, roomId })
-      );
+      // No STOMP send here—backend will broadcast once.
     } catch (err) {
       console.error("Image upload failed", err);
       toast.error("Image upload failed");
     }
   };
 
-  // logout
-  function handleLogout() {
+  // Delete for me (soft delete)
+  const deleteForMe = async (messageId) => {
+    try {
+      const response = await httpClient.delete(
+          `/api/v1/rooms/${roomId}/messages/${messageId}/deleteForMe`,
+          { params: { user: currentUser } }
+      );
+      if (response.status !== 200) {
+        throw new Error("Status " + response.status);
+      }
+    } catch (err) {
+      console.error(
+          "Delete for Me failed:",
+          err.response?.data || err.message
+      );
+      toast.error("Delete for Me failed: " + (err.response?.data || err.message));
+    }
+  };
+
+  // Delete for everyone (hard delete)
+  const deleteForEveryone = async (messageId) => {
+    try {
+      const response = await httpClient.delete(
+          `/api/v1/rooms/${roomId}/messages/${messageId}/deleteForEveryone`
+      );
+      if (response.status !== 200) {
+        throw new Error("Status " + response.status);
+      }
+    } catch (err) {
+      console.error(
+          "Delete for Everyone failed:",
+          err.response?.data || err.message
+      );
+      toast.error(
+          "Delete for Everyone failed: " + (err.response?.data || err.message)
+      );
+    }
+  };
+
+  // Logout
+  const handleLogout = () => {
     stompClient?.disconnect();
     setConnected(false);
     setRoomId("");
     setCurrentUser("");
     navigate("/");
-  }
+  };
 
   return (
       <div className="">
-        {/* header */}
-        <header className="dark:border-gray-700 fixed w-full dark:bg-gray-900 py-5 shadow flex justify-around items-center">
-          <div>
-            <h1 className="text-xl font-semibold">
-              Room : <span>{roomId}</span>
+        {/* 1) Header: fixed at top, explicitly h-16 (64px) */}
+        <header className="fixed top-0 left-0 w-full h-16 dark:bg-gray-900 dark:border-gray-700 py-4 px-6 shadow flex justify-between items-center z-10">
+          <div className="flex items-center gap-8">
+            <h1 className="text-xl font-semibold text-white">
+              Room : <span className="font-normal">{roomId}</span>
+            </h1>
+            <h1 className="text-xl font-semibold text-white">
+              User : <span className="font-normal">{currentUser}</span>
             </h1>
           </div>
-          <div>
-            <h1 className="text-xl font-semibold">
-              User : <span>{currentUser}</span>
-            </h1>
-          </div>
-          <div>
-            <button
-                onClick={handleLogout}
-                className="dark:bg-red-500 dark:hover:bg-red-700 px-3 py-2 rounded-full"
-            >
-              Leave Room
-            </button>
-          </div>
+          <button
+              onClick={handleLogout}
+              className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-full"
+          >
+            Leave Room
+          </button>
         </header>
 
-        {/* chat history */}
+        {/*
+        2) Chat history <main>:
+           - mt-16 pushes it down exactly 64px (header height).
+           - mb-16 leaves 64px space at bottom (input bar height).
+           - h-[calc(100vh-128px)] → 100vh minus header (64px) minus input bar (64px).
+           - overflow-auto confines scrolling to this box.
+      */}
         <main
             ref={chatBoxRef}
-            className="py-20 px-10 w-2/3 dark:bg-slate-600 mx-auto h-screen overflow-auto"
+            className="mt-16 mb-16 px-10 w-2/3 dark:bg-slate-600 mx-auto overflow-auto h-[calc(100vh-128px)]"
         >
-          {messages.map((message, index) => (
-              <div
-                  key={index}
-                  className={`flex ${
-                      message.sender === currentUser ? "justify-end" : "justify-start"
-                  }`}
-              >
-                <div
-                    className={`my-2 ${
-                        message.sender === currentUser ? "bg-green-800" : "bg-gray-800"
-                    } p-2 max-w-xs rounded`}
-                >
-                  <div className="flex flex-row gap-2">
-                    <img
-                        className="h-10 w-10"
-                        src={"https://avatar.iran.liara.run/public/43"}
-                        alt=""
-                    />
-                    <div className="flex flex-col gap-1">
-                      <p className="text-sm font-bold">{message.sender}</p>
-                      {message.content && <p>{message.content}</p>}
-                      {message.imageUrl && (
-                          <div className="flex justify-center my-1">
-                            <img
-                                src={message.imageUrl}
-                                alt="upload"
-                                className="max-w-full h-auto object-contain rounded"
-                            />
-                          </div>
-                      )}
-                      <p className="text-xs text-gray-400">
-                        {timeAgo(message.timeStamp)}
+          {messages.map((message, index) => {
+            // Soft-deleted for this user → skip
+            if (message.deletedBy && message.deletedBy.includes(currentUser)) {
+              return null;
+            }
+
+            // Hard-deleted for everyone → show placeholder
+            if (message.deletedForEveryone) {
+              return (
+                  <div key={index} className="flex justify-center my-2">
+                    <div className="bg-gray-700 p-2 rounded max-w-xs">
+                      <p className="text-gray-300 italic text-center">
+                        This message was deleted
                       </p>
                     </div>
                   </div>
+              );
+            }
+
+            const isOwnMessage = message.sender === currentUser;
+            return (
+                <div
+                    key={index}
+                    className={`flex ${
+                        isOwnMessage ? "justify-end" : "justify-start"
+                    }`}
+                >
+                  <div
+                      className={`my-2 ${
+                          isOwnMessage ? "bg-green-800" : "bg-gray-800"
+                      } p-3 max-w-xs rounded relative`}
+                  >
+                    <div className="flex flex-row gap-2">
+                      <img
+                          className="h-10 w-10 rounded-full"
+                          src="https://avatar.iran.liara.run/public/43"
+                          alt=""
+                      />
+                      <div className="flex flex-col gap-1">
+                        <p className="text-sm font-bold text-white">
+                          {message.sender}
+                        </p>
+                        {message.content && (
+                            <p className="text-white">{message.content}</p>
+                        )}
+                        {message.imageUrl && (
+                            <div className="flex justify-center my-1">
+                              <img
+                                  src={message.imageUrl}
+                                  alt="upload"
+                                  className="max-w-full h-auto object-contain rounded"
+                              />
+                            </div>
+                        )}
+                        <p className="text-xs text-gray-400">
+                          {timeAgo(message.timeStamp)}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Delete menu for your own messages */}
+                    {isOwnMessage && (
+                        <div className="absolute top-1 right-1 group relative">
+                          <button className="text-gray-400 hover:text-gray-200 focus:outline-none">
+                            ⋮
+                          </button>
+                          <div className="hidden group-hover:block absolute top-full right-0 mt-1 w-44 bg-gray-700 rounded shadow-lg z-10">
+                            <button
+                                onClick={() => deleteForMe(message.messageId)}
+                                className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-gray-600"
+                            >
+                              Delete for Me
+                            </button>
+                            <button
+                                onClick={() => deleteForEveryone(message.messageId)}
+                                className="block w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-gray-600"
+                            >
+                              Delete for Everyone
+                            </button>
+                          </div>
+                        </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-          ))}
+            );
+          })}
         </main>
 
-        {/* hidden file input for image upload */}
+        {/* 3) Hidden file input for image uploads */}
         <input
             type="file"
             accept="image/*"
@@ -204,9 +303,12 @@ const ChatPage = () => {
             onChange={handleFileChange}
         />
 
-        {/* input bar */}
-        <div className="fixed bottom-4 w-full h-16">
-          <div className="h-full pr-10 gap-4 flex items-center justify-between rounded-full w-1/2 mx-auto dark:bg-gray-900">
+        {/*
+        4) Input bar fixed at bottom (h-16 = 64px).  
+           Since <main> has mb-16, chat messages never slip under this bar.
+      */}
+        <div className="fixed bottom-0 left-0 w-full h-16 px-6 bg-transparent flex items-center justify-center">
+          <div className="w-2/3 flex items-center gap-4 bg-gray-900 rounded-full px-4 py-2">
             <input
                 ref={inputRef}
                 value={input}
@@ -214,23 +316,20 @@ const ChatPage = () => {
                 onKeyDown={(e) => e.key === "Enter" && sendMessage()}
                 type="text"
                 placeholder="Type your message here..."
-                className="w-full dark:border-gray-600 dark:bg-gray-800 px-5 py-2 rounded-full h-full focus:outline-none"
+                className="w-full bg-gray-800 px-4 py-2 rounded-full focus:outline-none text-white"
             />
-
-            <div className="flex gap-1">
-              <button
-                  onClick={() => fileInputRef.current.click()}
-                  className="dark:bg-purple-600 h-10 w-10 flex justify-center items-center rounded-full"
-              >
-                <MdAttachFile size={20} />
-              </button>
-              <button
-                  onClick={sendMessage}
-                  className="dark:bg-green-600 h-10 w-10 flex justify-center items-center rounded-full"
-              >
-                <MdSend size={20} />
-              </button>
-            </div>
+            <button
+                onClick={() => fileInputRef.current.click()}
+                className="bg-purple-600 hover:bg-purple-700 p-2 rounded-full"
+            >
+              <MdAttachFile size={20} color="white" />
+            </button>
+            <button
+                onClick={sendMessage}
+                className="bg-green-600 hover:bg-green-700 p-2 rounded-full"
+            >
+              <MdSend size={20} color="white" />
+            </button>
           </div>
         </div>
       </div>
