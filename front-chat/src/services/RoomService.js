@@ -1,3 +1,4 @@
+// src/services/RoomService.js
 import { httpClient } from "../config/AxiosHelper";
 
 export const createRoomApi = async (roomDetail) => {
@@ -18,5 +19,12 @@ export const getMessagess = async (roomId, size = 50, page = 0) => {
   const response = await httpClient.get(
     `/api/v1/rooms/${roomId}/messages?size=${size}&page=${page}`
   );
+  return response.data;
+};
+
+// ──────────────────────────────────────────────────────────────────────────────
+// NEW: fetchMembers returns the list of distinct senders (members) in a room
+export const fetchMembers = async (roomId) => {
+  const response = await httpClient.get(`/api/v1/rooms/${roomId}/members`);
   return response.data;
 };
